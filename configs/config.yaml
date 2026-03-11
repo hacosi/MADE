@@ -11,7 +11,8 @@ experiment:
   output_dir: ${hydra:run.dir}
   num_episodes: 3
   seed: null
-  infra: local   # local, modal
+  infra: local   # local, mp
+  num_workers: null  # number of parallel workers for mp (null = use num_episodes)
   verbose: true # print info during episode
   logging_level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
   # for multi-system evaluation run_multi_systems.py

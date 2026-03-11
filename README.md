@@ -37,8 +37,6 @@ export ANTHROPIC_API_KEY=your_key  # for Anthropic agents
 export OPENAI_API_KEY=your_key  # for OpenAI agents
 ```
 
-Add these API keys to Modal secrets too if running on Modal.
-
 Update the wandb entity in `configs/logger/wandb.yaml` to your wandb username/team if you want to save progress to wandb. Otherwise, set `use_wandb: false`.
 
 ## Quick Start
@@ -47,8 +45,8 @@ Update the wandb entity in `configs/logger/wandb.yaml` to your wandb username/te
 # Run a single benchmark locally (Li-O system, random agent, ORB oracle, 3 episodes, 5 queries)
 uv run scripts/run_benchmark.py
 
-# Run on Modal (parallel episodes)
-uv run scripts/run_benchmark.py experiment.infra=modal
+# Run with parallel episodes via multiprocessing
+uv run scripts/run_benchmark.py experiment.infra=mp
 
 # Run with custom config
 uv run scripts/run_benchmark.py dataset.elements='[Fe,O]' experiment.num_episodes=5
@@ -67,20 +65,27 @@ All environment, oracle, and agent components are defined via Hydra config files
 We provide the configs used to run the baseline experiments in the paper in the agents config folder. These can be run using the scripts in `scripts/`. For example:
 
 ```bash
-# Local (sequential)
+# Sequential
 uv run scripts/run_baseline_experiments.py \
-    --agent-configs "random_generator_baseline chemeleon_generative_baseline" \
+    --agent-configs random_generator_baseline chemeleon_generative_baseline \
     --systems-file ./data/systems_10_mp_20/systems_ternary_n10_maxatoms20_intermetallic_smact.json
 
-# Modal (parallel)
-uv run modal run --detach scripts/run_baseline_experiments_modal.py \
-    --agent-configs "random_generator_baseline chemeleon_generative_baseline" \
-    --systems-file ./data/systems_10_mp_20/systems_ternary_n10_maxatoms20_intermetallic_smact.json
+# Parallel episodes within each agent config (multiprocessing)
+uv run scripts/run_baseline_experiments.py \
+    --agent-configs random_generator_baseline chemeleon_generative_baseline \
+    --systems-file ./data/systems_10_mp_20/systems_ternary_n10_maxatoms20_intermetallic_smact.json \
+    --infra mp
+
+# Parallel agent configs (concurrent subprocesses)
+uv run scripts/run_baseline_experiments.py \
+    --agent-configs random_generator_baseline chemeleon_generative_baseline \
+    --systems-file ./data/systems_10_mp_20/systems_ternary_n10_maxatoms20_intermetallic_smact.json \
+    --parallel
 ```
 
 to run the random generator and chemeleon generative baseline on ternary intermetallic systems.
 
-This will save results to `./results/baselines/`, or on a Modal volume if running on Modal.
+Results are saved to `./results/baselines/`.
 
 ## Results Format
 

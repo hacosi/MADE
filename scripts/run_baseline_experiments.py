@@ -77,7 +77,7 @@ def run_single_baseline_experiment(
         max_systems: Number of systems to run (default: 20)
         budget: Queries per system (default: 50)
         num_episodes: Episodes per system (default: 1)
-        infra: "local" or "modal"
+        infra: "local" or "mp"
         output_base_dir: Base directory for results
         seed: Random seed for reproducibility
         use_wandb: Whether to use wandb logging
@@ -250,6 +250,7 @@ def run_multiple_baseline_experiments(
     wandb_tags: list[str] | None = None,
     continue_on_error: bool = True,
     resume: bool = True,
+    parallel: bool = False,
 ) -> dict[str, Path | None]:
     """
     Run multiple baseline experiments.
@@ -260,50 +261,109 @@ def run_multiple_baseline_experiments(
         max_systems: Number of systems per experiment
         budget: Queries per system
         num_episodes: Episodes per system
-        infra: "local" or "modal"
+        infra: "local" or "mp"
         output_base_dir: Base directory for results
         seed: Random seed
         use_wandb: Whether to use wandb
         wandb_project: Wandb project name
         wandb_tags: List of wandb tags
         continue_on_error: If True, continue with remaining experiments on error
+        parallel: If True, run all agent configs concurrently
 
     Returns:
         Dictionary mapping agent_config -> output_dir (or None if failed)
     """
     results: dict[str, Path | None] = {}
+    systems_file = systems_files[0] if systems_files else None
 
-    for agent_config in agent_configs:
-        logger.info(f"\n{'='*80}")
-        logger.info(f"Running experiment: {agent_config}")
-        logger.info(f"{'='*80}")
+    common_kwargs = dict(
+        systems_file=systems_file or "",
+        max_systems=max_systems,
+        budget=budget,
+        num_episodes=num_episodes,
+        infra=infra,
+        output_base_dir=output_base_dir,
+        seed=seed,
+        max_stoichiometry=max_stoichiometry,
+        stability_tolerance=stability_tolerance,
+        use_wandb=use_wandb,
+        wandb_project=wandb_project,
+        wandb_tags=wandb_tags,
+        resume=resume,
+    )
 
-        # Use first systems_file if provided, otherwise None (will use config default)
-        systems_file = systems_files[0] if systems_files else None
+    if parallel and len(agent_configs) > 1:
+        logger.info(f"Running {len(agent_configs)} experiments in parallel")
+        # Launch all as concurrent subprocesses via run_single_baseline_experiment
+        # Each one already spawns a subprocess, so we just launch them all at once
+        processes: list[tuple[str, subprocess.Popen]] = []
+        for agent_config in agent_configs:
+            logger.info(f"Launching experiment: {agent_config}")
+            output_dir = Path(output_base_dir) / f"{agent_config}_{Path(systems_file or '').stem}_{max_systems}systems_{budget}queries_{int(stability_tolerance * 1000)}stabilitymeV"
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        try:
-            output_dir = run_single_baseline_experiment(
-                agent_config=agent_config,
-                systems_file=systems_file or "",  # Will use config default if empty
-                max_systems=max_systems,
-                budget=budget,
-                num_episodes=num_episodes,
-                infra=infra,
-                output_base_dir=output_base_dir,  # Use provided directory (may already be timestamped)
-                seed=seed,
-                max_stoichiometry=max_stoichiometry,
-                stability_tolerance=stability_tolerance,
-                use_wandb=use_wandb,
-                wandb_project=wandb_project,
-                wandb_tags=wandb_tags,
-                resume=resume,
+            script_path = Path(__file__).parent / "run_multi_systems.py"
+            config_overrides = [
+                f"agent={agent_config}",
+                f"experiment.systems_file={systems_file or ''}",
+                f"experiment.max_systems={max_systems}",
+                f"environment.budget={budget}",
+                f"experiment.num_episodes={num_episodes}",
+                f"experiment.infra={infra}",
+                f"experiment.output_dir={output_dir}",
+                f"logger.use_wandb={use_wandb}",
+                f"logger.wandb_project={wandb_project}",
+                f"environment.stability_tolerance={stability_tolerance}",
+                f"++agent.max_stoichiometry={max_stoichiometry}",
+                f"++agent.planner.max_stoichiometry={max_stoichiometry}",
+                f"environment.max_stoichiometry={max_stoichiometry}",
+            ]
+            if seed is not None:
+                config_overrides.append(f"experiment.seed={seed}")
+            if wandb_tags:
+                tags_str = ",".join(wandb_tags)
+                config_overrides.append(f"logger.wandb_tags=[{tags_str}]")
+
+            cmd = [sys.executable, str(script_path)] + config_overrides
+            proc = subprocess.Popen(
+                cmd,
+                cwd=Path(__file__).parent.parent,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
+            processes.append((agent_config, proc))
             results[agent_config] = output_dir
-        except Exception as e:
-            logger.error(f"Failed to run experiment {agent_config}: {e}")
-            results[agent_config] = None
-            if not continue_on_error:
-                raise
+
+        # Wait for all to finish
+        for agent_config, proc in processes:
+            try:
+                stdout, _ = proc.communicate()
+                if stdout:
+                    print(stdout)
+                if proc.returncode != 0:
+                    logger.error(f"Experiment {agent_config} failed with return code {proc.returncode}")
+                    results[agent_config] = None
+            except Exception as e:
+                logger.error(f"Failed to run experiment {agent_config}: {e}")
+                results[agent_config] = None
+    else:
+        for agent_config in agent_configs:
+            logger.info(f"\n{'='*80}")
+            logger.info(f"Running experiment: {agent_config}")
+            logger.info(f"{'='*80}")
+
+            try:
+                output_dir = run_single_baseline_experiment(
+                    agent_config=agent_config,
+                    **common_kwargs,
+                )
+                results[agent_config] = output_dir
+            except Exception as e:
+                logger.error(f"Failed to run experiment {agent_config}: {e}")
+                results[agent_config] = None
+                if not continue_on_error:
+                    raise
 
     return results
 
@@ -346,7 +406,7 @@ def main():
         "--infra",
         type=str,
         default="local",
-        choices=["local", "modal"],
+        choices=["local", "mp"],
         help="Infrastructure to use (default: local)",
     )
     parser.add_argument(
@@ -407,6 +467,11 @@ def main():
         action="store_false",
         help="Do not resume from existing results",
     )
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Run all agent configs in parallel (concurrent subprocesses)",
+    )
 
     args = parser.parse_args()
 
@@ -443,6 +508,7 @@ def main():
         wandb_tags=args.wandb_tags,
         continue_on_error=not args.stop_on_error,
         resume=args.resume,
+        parallel=args.parallel,
     )
 
     # Print summary
