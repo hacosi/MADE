@@ -78,7 +78,8 @@ class ChemeleonGenerator(Generator):
         from chemeleon_dng import sample as sample_mod
 
         with tempfile.TemporaryDirectory(prefix="chemeleon_samples_") as tmpdir:
-            out_dir = Path(tmpdir) if self.output_dir is None else Path(self.output_dir)
+            out_dir = Path(tmpdir) if self.output_dir is None else Path(
+                self.output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
 
             num_samples = max(int(plan.num_candidates), 1)
@@ -90,7 +91,8 @@ class ChemeleonGenerator(Generator):
                     )
 
                 if not plan.compositions:
-                    raise ValueError("CSP task requires compositions in the plan")
+                    raise ValueError(
+                        "CSP task requires compositions in the plan")
 
                 formulas = [str(c) for c in plan.compositions]
                 samples_per_formula = num_samples // len(formulas) or 1
@@ -128,7 +130,8 @@ class ChemeleonGenerator(Generator):
                 )
 
             else:
-                raise ValueError(f"Unknown task: {self.task}. Must be 'csp' or 'dng'")
+                raise ValueError(f"Unknown task: {
+                                 self.task}. Must be 'csp' or 'dng'")
 
             # Read generated CIF files
             cif_paths = sorted(out_dir.rglob("*.cif"))

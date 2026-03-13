@@ -366,7 +366,7 @@ class ConvexHullEnvironment(Environment):
         self,
         ground_truth: bool = False,
         show_unstable: float = 1.0,
-        backend: str = "plotly",
+        backend: str = "matplotlib",
         show: bool = False,
     ):
         """Get a plot of the phase diagram.
@@ -383,10 +383,7 @@ class ConvexHullEnvironment(Environment):
             backend=backend,
         ).get_plot()
         if show:
-            if backend == "plotly":
-                fig.show()
-            elif backend == "matplotlib":
-                plt.show()
+            plt.show()
         return fig
 
     def get_stable_entries(self, epsilon: float | None = None) -> list[PDEntry]:

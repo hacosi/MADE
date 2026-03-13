@@ -15,6 +15,7 @@ from typing import Any
 import multiprocessing
 
 import dotenv
+import matplotlib.pyplot as plt
 import hydra
 import numpy as np
 import tqdm.auto as tqdm
@@ -412,10 +413,9 @@ def run_benchmark(config: DictConfig) -> None:
         )
         num_elements = len(result["final_env_state"].get("elements", []))
         if num_elements <= 4:
-            fig = phase_diagram.get_plot(backend="plotly", show_unstable=1.0)
-            fig.write_image(
-                trajectories_dir / f"phase_diagram_episode_{ep:03d}.png"
-            )
+            fig = phase_diagram.get_plot(backend="matplotlib", show_unstable=1.0)
+            plt.savefig(trajectories_dir / f"phase_diagram_episode_{ep:03d}.png")
+            plt.close()
 
     try:
         if config.experiment.infra == "mp":
@@ -449,8 +449,9 @@ def run_benchmark(config: DictConfig) -> None:
         phase_diagram_gt = PhaseDiagram(
             [PDEntry.from_dict(e) for e in result["phase_diagram_gt"]]
         )
-        fig = phase_diagram_gt.get_plot(backend="plotly", show_unstable=1.0)
-        fig.write_image(summary_dir / "phase_diagram_gt.png")
+        fig = phase_diagram_gt.get_plot(backend="matplotlib", show_unstable=1.0)
+        plt.savefig(summary_dir / "phase_diagram_gt.png")
+        plt.close()
 
     # Write episodes metrics to JSON (array)
     with open(summary_dir / "episodes.json", "w") as f_json:
