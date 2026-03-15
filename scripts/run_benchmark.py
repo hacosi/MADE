@@ -12,9 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import multiprocessing
+
 import dotenv
+import matplotlib.pyplot as plt
 import hydra
-import modal
 import numpy as np
 import tqdm.auto as tqdm
 from hydra.utils import instantiate
@@ -26,46 +28,6 @@ logger = logging.getLogger(__name__)
 
 from pymatgen.analysis.phase_diagram import PDEntry, PhaseDiagram
 from pymatgen.core.structure import Structure
-
-# install requirements and port local code to modal
-image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")  # needed to install packages from GitHub
-    .pip_install(
-        "ase>=3.25.0",
-        "ase-ga>=0.2.0",
-        "average-minimum-distance>=1.6.0",
-        "dspy>=3.0.3",
-        "hydra-core>=1.3.1",
-        "kaleido>=1.0.0",
-        "mace-torch>=0.3.14",
-        "modal>=1.1.1",
-        "mp-api>=0.45.8",
-        "orb-models>=0.5.4",
-        "pydantic>=2.0.0",
-        "pymatgen>=2025.6.14",
-        "scipy>=1.16.1",
-        "smact>=3.2.0",
-        "wandb>=0.21.1",
-        "uv",
-    )
-    .pip_install(
-        "chemeleon-dng @ git+https://github.com/hspark1212/chemeleon-dng.git"
-    )
-    .run_commands(
-    "ln -sf /ckpts/chemeleon/ckpts /root/ckpts"
-    )
-    .add_local_dir("./data", "/root/data")
-    .add_local_dir("./src", "/root/src")
-    .add_local_python_source("made")
-)
-
-app = modal.App("benchmark-runner", image=image)
-
-# Create a volume for checkpointing episodes
-checkpoint_volume = modal.Volume.from_name("benchmark-checkpoints", create_if_missing=True)
-
-model_checkpoints_volume = modal.Volume.from_name("matopt-checkpoints", create_if_missing=True)
 
 
 def flatten_dict(d, parent_key="", sep="_"):
@@ -84,11 +46,7 @@ def flatten_dict(d, parent_key="", sep="_"):
 
 def get_checkpoint_dir() -> Path:
     """Get the base checkpoint directory."""
-    # Use /checkpoints on Modal, or local ./checkpoints for local execution
-    if Path("/checkpoints").exists():
-        checkpoint_dir = Path("/checkpoints")
-    else:
-        checkpoint_dir = Path("./checkpoints")
+    checkpoint_dir = Path("./checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return checkpoint_dir
 
@@ -208,25 +166,14 @@ def restore_environment_from_trajectory(
     logger.info(f"Environment restored: query_count={env.query_count}")
 
 
-@app.function(
-    gpu="T4",
-    volumes={"/checkpoints": checkpoint_volume, "/ckpts": model_checkpoints_volume},
-    secrets=[
-        modal.Secret.from_name("materials-project-api-key"),
-        modal.Secret.from_name("wandb-api-key"),
-        modal.Secret.from_name("anthropic-api-key"),
-        modal.Secret.from_name("openai-api-key"),
-    ],
-    timeout=60 * 60 * 24,
-)
 def run_episode(
     config: DictConfig,
     episode_id: int = 0,
     wandb_run_name: str = "benchmark",
     system_id: str | None = None,
 ) -> None:
-    """Run a single episode on a modal cluster.
-    
+    """Run a single episode.
+
     Args:
         config: Hydra config
         episode_id: Episode number
@@ -338,12 +285,6 @@ def run_episode(
             if hasattr(env, "get_metrics_history"):
                 metrics_history = env.get_metrics_history()
             save_checkpoint(checkpoint_path, agent_state, env_state, trajectory, query_count, wandb_run_id, metrics_history, config)
-            # Commit volume to persist checkpoint (only on Modal)
-            try:
-                checkpoint_volume.commit()
-            except NameError:
-                # checkpoint_volume not available (local execution)
-                pass
 
             with open(tmp_trajectory_file, "w") as f:
                 json.dump(trajectory, f, indent=2)
@@ -382,10 +323,6 @@ def run_episode(
         if hasattr(env, "get_metrics_history"):
             metrics_history = env.get_metrics_history()
         save_checkpoint(checkpoint_path, agent_state, env_state, trajectory, query_count, wandb_run_id, metrics_history, config)
-        try:
-            checkpoint_volume.commit()
-        except NameError:
-            pass
         logger.info("Checkpoint saved before exit")
 
     final_metrics = {"episode_id": episode_id}
@@ -413,10 +350,6 @@ def run_episode(
     if checkpoint_path.exists():
         checkpoint_path.unlink()
         logger.info(f"Removed checkpoint file {checkpoint_path} after successful completion")
-        try:
-            checkpoint_volume.commit()
-        except NameError:
-            pass
 
     return results
 
@@ -467,63 +400,42 @@ def run_benchmark(config: DictConfig) -> None:
     summary_dir = out_dir / "summary"
     summary_dir.mkdir(parents=True, exist_ok=True)
 
+    def _save_episode_result(ep: int, result: dict[str, Any]) -> None:
+        """Save trajectory and phase diagram for one episode."""
+        per_episode.append(result.get("metrics", {}))
+        with open(trajectories_dir / f"episode_{ep:03d}.json", "w") as f_traj:
+            json.dump(result, f_traj, indent=2)
+        phase_diagram = PhaseDiagram(
+            [
+                PDEntry.from_dict(e)
+                for e in result["final_env_state"]["phase_diagram_all_entries"]
+            ]
+        )
+        num_elements = len(result["final_env_state"].get("elements", []))
+        if num_elements <= 4:
+            fig = phase_diagram.get_plot(backend="matplotlib", show_unstable=1.0)
+            plt.savefig(trajectories_dir / f"phase_diagram_episode_{ep:03d}.png")
+            plt.close()
+
     try:
-        # run episodes in parallel
-        if config.experiment.infra == "modal":
-            with modal.enable_output():
-                with app.run():
-                    # Create arguments with episode IDs for each episode
-                    episode_args = [
-                        (config, ep, wandb_run_name, None) for ep in range(num_episodes)
-                    ]
-                    for ep, result in enumerate(run_episode.starmap(episode_args)):
-                        per_episode.append(result.get("metrics", {}))
-                        # Save trajectory and phase diagram per episode
-                        with open(
-                            trajectories_dir / f"episode_{ep:03d}.json", "w"
-                        ) as f_traj:
-                            json.dump(result, f_traj, indent=2)
-                        # can load phase diagram from the final state
-                        phase_diagram = PhaseDiagram(
-                            [
-                                PDEntry.from_dict(e)
-                                for e in result["final_env_state"][
-                                    "phase_diagram_all_entries"
-                                ]
-                            ]
-                        )
-                        # Only plot phase diagrams with 4 or fewer elements
-                        num_elements = len(result["final_env_state"].get("elements", []))
-                        if num_elements <= 4:
-                            fig = phase_diagram.get_plot(
-                                backend="plotly", show_unstable=1.0
-                            )
-                            fig.write_image(
-                                trajectories_dir / f"phase_diagram_episode_{ep:03d}.png"
-                            )
+        if config.experiment.infra == "mp":
+            # Parallel episodes via multiprocessing
+            num_workers = int(config.experiment.get("num_workers", 0) or num_episodes)
+            episode_args = [
+                (config, ep, wandb_run_name, None) for ep in range(num_episodes)
+            ]
+            ctx = multiprocessing.get_context("spawn")
+            with ctx.Pool(processes=num_workers) as pool:
+                results_list = pool.starmap(run_episode, episode_args)
+            for ep, result in enumerate(results_list):
+                _save_episode_result(ep, result)
         else:
+            # Sequential (local)
             for ep in tqdm.trange(num_episodes, desc="Running episodes"):
-                result = run_episode.local(
+                result = run_episode(
                     config, ep, wandb_run_name=wandb_run_name, system_id=None
                 )
-                per_episode.append(result.get("metrics", {}))
-                # Save trajectory and phase diagram per episode
-                with open(trajectories_dir / f"episode_{ep:03d}.json", "w") as f_traj:
-                    json.dump(result, f_traj, indent=2)
-                # can load phase diagram from the final state
-                phase_diagram = PhaseDiagram(
-                    [
-                        PDEntry.from_dict(e)
-                        for e in result["final_env_state"]["phase_diagram_all_entries"]
-                    ]
-                )
-                # Only plot phase diagrams with 4 or fewer elements
-                num_elements = len(result["final_env_state"].get("elements", []))
-                if num_elements <= 4:
-                    fig = phase_diagram.get_plot(backend="plotly", show_unstable=1.0)
-                    fig.write_image(
-                        trajectories_dir / f"phase_diagram_episode_{ep:03d}.png"
-                    )
+                _save_episode_result(ep, result)
     except KeyboardInterrupt:
         import traceback
 
@@ -537,8 +449,9 @@ def run_benchmark(config: DictConfig) -> None:
         phase_diagram_gt = PhaseDiagram(
             [PDEntry.from_dict(e) for e in result["phase_diagram_gt"]]
         )
-        fig = phase_diagram_gt.get_plot(backend="plotly", show_unstable=1.0)
-        fig.write_image(summary_dir / "phase_diagram_gt.png")
+        fig = phase_diagram_gt.get_plot(backend="matplotlib", show_unstable=1.0)
+        plt.savefig(summary_dir / "phase_diagram_gt.png")
+        plt.close()
 
     # Write episodes metrics to JSON (array)
     with open(summary_dir / "episodes.json", "w") as f_json:

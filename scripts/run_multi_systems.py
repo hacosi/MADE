@@ -10,14 +10,15 @@ import csv
 import importlib.util
 import json
 import logging
+import multiprocessing
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import dotenv
+import matplotlib.pyplot as plt
 import hydra
-import modal
 import numpy as np
 import tqdm.auto as tqdm
 from omegaconf import DictConfig, OmegaConf
@@ -153,71 +154,51 @@ def run_multi_systems(config: DictConfig) -> None:
             num_episodes = int(cfg_this.experiment.get("num_episodes", 1))
             per_episode: list[dict[str, Any]] = []
 
-            try:
-                if cfg_this.experiment.infra == "modal":
-                    with modal.enable_output():
-                        with rb.app.run():
-                            episode_args = [
-                                (cfg_this, ep, wandb_run_name, system_id)
-                                for ep in range(num_episodes)
+            def _save_episode_result(ep: int, result: dict[str, Any]) -> None:
+                per_episode.append(result.get("metrics", {}))
+                with open(
+                    trajectories_dir / f"episode_{ep:03d}.json", "w"
+                ) as f_traj:
+                    json.dump(result, f_traj, indent=2)
+                num_elements = len(result["final_env_state"].get("elements", []))
+                if num_elements <= 4:
+                    phase_diagram = PhaseDiagram(
+                        [
+                            PDEntry.from_dict(e)
+                            for e in result["final_env_state"][
+                                "phase_diagram_all_entries"
                             ]
-                            for ep, result in enumerate(
-                                rb.run_episode.starmap(episode_args)
-                            ):
-                                per_episode.append(result.get("metrics", {}))
-                                # Save trajectory and per-episode PD image
-                                with open(
-                                    trajectories_dir / f"episode_{ep:03d}.json", "w"
-                                ) as f_traj:
-                                    json.dump(result, f_traj, indent=2)
-                                # Only plot phase diagrams with 4 or fewer elements
-                                num_elements = len(result["final_env_state"].get("elements", []))
-                                if num_elements <= 4:
-                                    phase_diagram = PhaseDiagram(
-                                        [
-                                            PDEntry.from_dict(e)
-                                            for e in result["final_env_state"][
-                                                "phase_diagram_all_entries"
-                                            ]
-                                        ]
-                                    )
-                                    fig = phase_diagram.get_plot(
-                                        backend="plotly", show_unstable=1.0
-                                    )
-                                    fig.write_image(
-                                        trajectories_dir
-                                        / f"phase_diagram_episode_{ep:03d}.png"
-                                    )
+                        ]
+                    )
+                    fig = phase_diagram.get_plot(
+                        backend="matplotlib", show_unstable=1.0
+                    )
+                    plt.savefig(
+                        trajectories_dir / f"phase_diagram_episode_{ep:03d}.png"
+                    )
+                    plt.close()
+
+            try:
+                if cfg_this.experiment.infra == "mp":
+                    num_workers = int(cfg_this.experiment.get("num_workers", 0) or num_episodes)
+                    episode_args = [
+                        (cfg_this, ep, wandb_run_name, system_id)
+                        for ep in range(num_episodes)
+                    ]
+                    ctx = multiprocessing.get_context("spawn")
+                    with ctx.Pool(processes=num_workers) as pool:
+                        results_list = pool.starmap(rb.run_episode, episode_args)
+                    for ep, result in enumerate(results_list):
+                        _save_episode_result(ep, result)
                 else:
                     for ep in tqdm.trange(num_episodes, desc=f"Episodes ({system_id})"):
-                        result = rb.run_episode.local(
+                        result = rb.run_episode(
                             cfg_this,
                             ep,
                             wandb_run_name=wandb_run_name,
                             system_id=system_id,
                         )
-                        per_episode.append(result.get("metrics", {}))
-                        with open(
-                            trajectories_dir / f"episode_{ep:03d}.json", "w"
-                        ) as f_traj:
-                            json.dump(result, f_traj, indent=2)
-                        # Only plot phase diagrams with 4 or fewer elements
-                        num_elements = len(result["final_env_state"].get("elements", []))
-                        if num_elements <= 4:
-                            phase_diagram = PhaseDiagram(
-                                [
-                                    PDEntry.from_dict(e)
-                                    for e in result["final_env_state"][
-                                        "phase_diagram_all_entries"
-                                    ]
-                                ]
-                            )
-                            fig = phase_diagram.get_plot(
-                                backend="plotly", show_unstable=1.0
-                            )
-                            fig.write_image(
-                                trajectories_dir / f"phase_diagram_episode_{ep:03d}.png"
-                            )
+                        _save_episode_result(ep, result)
             except KeyboardInterrupt:
                 import traceback
 
@@ -233,8 +214,9 @@ def run_multi_systems(config: DictConfig) -> None:
                 phase_diagram_gt = PhaseDiagram(
                     [PDEntry.from_dict(e) for e in first_result["phase_diagram_gt"]]
                 )
-                fig_gt = phase_diagram_gt.get_plot(backend="plotly", show_unstable=1.0)
-                fig_gt.write_image(summary_dir / "phase_diagram_gt.png")
+                fig_gt = phase_diagram_gt.get_plot(backend="matplotlib", show_unstable=1.0)
+                plt.savefig(summary_dir / "phase_diagram_gt.png")
+                plt.close()
 
             # Write per-system episodes metrics
             with open(summary_dir / "episodes.json", "w") as f_json:
