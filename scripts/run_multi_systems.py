@@ -31,11 +31,14 @@ logger = logging.getLogger(__name__)
 
 def _import_run_benchmark():
     """Dynamically import run_benchmark.py so script can be invoked directly."""
+    import sys
+
     script_path = Path(__file__).resolve().parent / "run_benchmark.py"
     spec = importlib.util.spec_from_file_location("run_benchmark", str(script_path))
     if spec is None or spec.loader is None:
         raise ImportError("Could not load run_benchmark.py")
     module = importlib.util.module_from_spec(spec)
+    sys.modules["run_benchmark"] = module  # register so multiprocessing can pickle refs
     spec.loader.exec_module(module)  # type: ignore
     return module
 
