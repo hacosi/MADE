@@ -45,6 +45,34 @@ class ChemeleonGenerator(Generator):
     def update_state(self, state: dict[str, Any]) -> None:
         pass
 
+    @staticmethod
+    def _ensure_checkpoints(ckpt_dir: str = "ckpts", max_retries: int = 10, retry_delay: int = 5) -> None:
+        """Download checkpoints, retrying if Figshare returns HTTP 202."""
+        from pathlib import Path
+        import time
+        import requests
+        from chemeleon_dng.download_util import FIGSHARE_URL, download_file, extract_tar_gz
+
+        ckpt_path = Path(ckpt_dir)
+        if ckpt_path.exists() and any(ckpt_path.glob("*.ckpt")):
+            return
+
+        ckpt_path.mkdir(parents=True, exist_ok=True)
+        tar_file = ckpt_path / "checkpoints.tar.gz"
+
+        for attempt in range(max_retries):
+            resp = requests.head(FIGSHARE_URL, timeout=30, allow_redirects=True)
+            if resp.status_code == 200:
+                break
+            logger.info(f"Figshare returned {resp.status_code}, retrying in {retry_delay}s ({attempt + 1}/{max_retries})")
+            time.sleep(retry_delay)
+        else:
+            raise RuntimeError(f"Figshare not ready after {max_retries} retries")
+
+        download_file(FIGSHARE_URL, tar_file)
+        extract_tar_gz(tar_file, ckpt_path.parent)
+        tar_file.unlink()
+
     def setup(self) -> None:
         """Initialize the diffusion model."""
         if self.dm is not None:
@@ -52,9 +80,11 @@ class ChemeleonGenerator(Generator):
 
         from chemeleon_dng import sample
         from chemeleon_dng.diffusion.diffusion_module import DiffusionModule
-        from chemeleon_dng.download_util import get_checkpoint_path
 
-        model_path = get_checkpoint_path(self.task, sample.DEFAULT_MODEL_PATH)
+        self._ensure_checkpoints()
+        model_path = sample.DEFAULT_MODEL_PATH.get(self.task)
+        if not model_path or not Path(model_path).exists():
+            raise FileNotFoundError(f"Checkpoint not found: {model_path}")
         self.dm = DiffusionModule.load_from_checkpoint(
             model_path, map_location=self.device
         )
