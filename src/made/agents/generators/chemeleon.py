@@ -46,12 +46,11 @@ class ChemeleonGenerator(Generator):
         pass
 
     @staticmethod
-    def _ensure_checkpoints(ckpt_dir: str = "ckpts", max_retries: int = 10, retry_delay: int = 5) -> None:
+    def _ensure_checkpoints(ckpt_dir: str = "ckpts", max_retries: int = 10, retry_delay: int = 10) -> None:
         """Download checkpoints, retrying if Figshare returns HTTP 202."""
-        from pathlib import Path
         import time
         import requests
-        from chemeleon_dng.download_util import FIGSHARE_URL, download_file, extract_tar_gz
+        from chemeleon_dng.download_util import FIGSHARE_URL, extract_tar_gz
 
         ckpt_path = Path(ckpt_dir)
         if ckpt_path.exists() and any(ckpt_path.glob("*.ckpt")):
@@ -61,15 +60,22 @@ class ChemeleonGenerator(Generator):
         tar_file = ckpt_path / "checkpoints.tar.gz"
 
         for attempt in range(max_retries):
-            resp = requests.head(FIGSHARE_URL, timeout=30, allow_redirects=True)
-            if resp.status_code == 200:
+            resp = requests.get(FIGSHARE_URL, stream=True, timeout=30, allow_redirects=True)
+            if resp.status_code == 200 and int(resp.headers.get("content-length", 0)) > 0:
+                total_size = int(resp.headers.get("content-length", 0))
+                logger.info(f"Downloading checkpoints ({total_size / 1024 / 1024:.1f} MB)...")
+                with open(tar_file, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
                 break
-            logger.info(f"Figshare returned {resp.status_code}, retrying in {retry_delay}s ({attempt + 1}/{max_retries})")
+            resp.close()
+            logger.info(f"Figshare returned status={resp.status_code} content-length={resp.headers.get('content-length')}, "
+                        f"retrying in {retry_delay}s ({attempt + 1}/{max_retries})")
             time.sleep(retry_delay)
         else:
             raise RuntimeError(f"Figshare not ready after {max_retries} retries")
 
-        download_file(FIGSHARE_URL, tar_file)
         extract_tar_gz(tar_file, ckpt_path.parent)
         tar_file.unlink()
 
