@@ -2,7 +2,7 @@ _target_: made.agents.scorers.LLMScorer
 
 # LLM backend configuration (mirrors planner config)
 llm_config:
-  model: openai/gpt-5.1 # anthropic/claude-sonnet-4-5-20250929 
+  model: openai/gpt-5-mini # openai/gpt-5.1, anthropic/claude-sonnet-4-5-20250929
   max_output_tokens: null
   temperature: null
   cache: false
